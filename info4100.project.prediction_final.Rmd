@@ -1,0 +1,469 @@
+---
+title: 'Group Project: Early Alert with LMS Data'
+author: '[[Karim Dergal, ked95]]'
+subtitle: INFO 4100/5101 Learning Analytics
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+library(tidyverse)
+# This loads 3 datasets: cl=clickstream, a=assessment grades; m=module states.
+load("info4100_edx_data.rda")
+```
+
+# Introduction
+
+**Goals:** The goal of this project is to learn how to work with raw Learning Management System (LMS) data and apply some of the prediction skills you have learned so far. You will develop a one-day early warning system for students who miss a graded submission. I am sharing with you an export of the class's edX log data thus far. I have anonymized the dataset and performed minimal data cleaning, leaving plenty of real-world messiness for you to tackle here. As always, you should start by getting to know the datasets. In this case, you should be able to really understand what is going on because it is YOUR data. In fact, you can navigate to the relevant pages on edX to see what page/action the data refers to.
+
+**Group Project:** This is a group project and I expect you to work as a team to come up with the best possible prediction accuracy. Your team will submit one common solution (note that EACH team member will need to submit the knitted Word doc on edx to get credit like with the first group project).
+
+**Try Your Best:** All members of the TWO teams that achieve the highest F1 scores will receive an extra credit point, and their solutions will be featured. To be eligible, your prediction problem needs to be set up correctly (i.e. everything else needs to be correct).
+
+# Step 1: Understand the data
+
+There are three datasets which can be connected using the hash_id column (a hashed version of the user id) and I am giving you links to the official documentation which you should read to understand the data better:
+
+1.  Clickstream data (1 row per student per action): [click for documentation](https://edx.readthedocs.io/projects/devdata/en/stable/internal_data_formats/tracking_logs.html#tracking-logs)
+2.  Module States (1 row per student per accessed content): original name [courseware-studentmodule (click for doumentation)](https://edx.readthedocs.io/projects/devdata/en/stable/internal_data_formats/sql_schema.html#courseware-studentmodule)
+3.  Assessment grades (1 row per assessment per student)
+
+I have already converted date-time objects into a numeric `timestamp` for you.
+
+To look up what pages URLs refer to (works for browser events, not server events), you can paste the URL into your browser. This should work for most URLs. I recommend doing this to be able to engineer more meaningful features.
+
+*Important note about the Clickstream data:* Due to an issue with the browser event logging this year, the Clickstream data contains no browser events, only server events. Clickstream data usually shows you what course materials students open at what time. This year the data only shows internal processes that are triggered by student actions in the course. These are harder to interpret in some cases (e.g. instead of seeing that a student navigated to the page where they submit the assignment, you see that the edx system processed an assignment grade). Given the cirumstances, you don't need to use the `cl` data but I kept it in here for two reasons: (1) to show you what it looks like, (2) in previous years, teams have made features out of server event log data and found them to be predictive.
+
+*Question 1:* In the space below, explore each dataset using `head()`, `n_distinct(data$some_id)`, `summary()`, `table(data$column)`. You can also plot the distribution of variables with histograms or boxplots. Check out the data documentation linked above to understand the meaning of each column.
+
+```{r}
+############################################### 
+###### BEGIN INPUT: Explore each dataset ###### 
+###############################################
+
+# Exploring Clickstreams
+# add code here
+# Took a look at this and it did not look useful
+
+# Exploring Module States
+# add code here
+head(m)
+
+# Exploring Assessment grades
+# add code here
+head(a)
+
+###############################################
+###############################################
+```
+
+You may notice that it would be helpful to combine the information about grades and time of first attempt with the module state data. Below I make this join for you. See that only 'sequential' modules have grade data associated with them. The boxplot shows when the different sequentials (containing problems) were attempted. This gives you an idea of the order of problems in the course.
+
+```{r}
+ma = m %>% left_join(
+    a %>% select(hash_id:possible_graded, first_attempted_timestamp), 
+    by = c("hash_id"="hash_id", "module_id"="usage_key")
+)
+
+# Only sequential modules have a grade associated with them
+table(ma$module_type, ma$first_attempted_timestamp>0)
+
+# We see that assignments were due (submitted) at different times
+boxplot(ma$first_attempted_timestamp ~ ma$module_id)
+```
+
+# Step 2: Define a prediction task
+
+Recall the guidelines for defining a good prediction problem covered in the Handbook chapter on prediction. You are looking for something actionable (an opportunity to intervene) and a situation that repeats (so the prediction can be useful in the future). The trade-off with the dataset you have here is that on the one hand it is very relevant to you but on the other hand it is relatively small. Still, the data is fine-grained and sufficiently messy to give you a taste of LMS data analysis.
+
+The prediction problem for this project is to build a one-day early warning system for missing a graded submission. Specifically, **your goal is to predict one day before the submission deadline, if a student will forget to submit an assignment**, so that the system can send a reminder. As you may have noticed during the data exploration phase above (if not, you should go back and examine this), there are several graded submissions and some students missed one or more of them. We define **missing a submission** as having an NA for `first_attempted_timestamp` but of course only for those that are past due.
+
+### Instructions
+
+1.  Treat each graded assignment as a prediction task (thus there are x\*n prediction opportunities where x = number of graded assignments and n = number of students)
+2.  Create a dataset that has 1 row per student per graded assessment with the binary outcome (did they MISS it? yes/no) and several predictors (see next tip)
+3.  Predictors (i.e. features) need to be engineered with data from **24hrs before each assignment is due**, which of course varies across assignments; that means you have much more information to predict later assignments than earlier ones
+4.  Once your dataset is ready, split it into a training and a test set
+5.  Train a prediction model on the training data; you can try out any of the ones we have covered in the prediction homework and Random Forest
+6.  Keep tuning your model choice, model parameters (if any), and feature engineering
+7.  Finally, test your prediction accuracy on the test set
+
+# Step 3: Getting you started
+
+## Create the outcome variable
+
+**Identify the graded assessments and whether a student did NOT submit**. Recall that we want to have a *warning* system, so the outcome should be the negative action.
+
+Get the outcome for each graded assignment. Figure out the deadline for each and compute the timestamp for 24hrs prior to the deadline. You probably want to use the `ma` dataset I created for you above.
+
+`r boxplot(ma$first_attempted_timestamp ~ ma$module_id)`
+
+The following table helps you see the various graded assignments to consider. We keep only those where possible_graded \> 0. **I define the deadline as the 90th percentile of submissions (you may use this simplification).**
+
+```{r}
+deadline = ma %>% 
+    filter(possible_graded > 0) %>%
+    group_by(module_id) %>% 
+    summarise(
+        deadline = quantile(first_attempted_timestamp, probs = .9, na.rm=T),
+        p_unsubmitted = mean(is.na(first_attempted_timestamp))
+    ) %>% 
+    arrange(deadline)
+```
+
+Now you know which assessments (module_ids) to target. **Be sure to kick out the one with p_unsubmitted \> 0.5**; They were not due yet when the export was created.
+
+```{r}
+df <- left_join(ma,deadline, by = "module_id") %>%
+  filter(p_unsubmitted <= .5)
+df
+```
+
+*Question 2:* Now build a dataset with an indicator for each person and each of these module_ids with 1=unsubmitted, 0=submitted. Keep track of the deadline: you only want to use features based on data up to 24hrs before it (i.e. `24 * 60 * 60` seconds).
+
+```{r}
+############################################### 
+####### BEGIN INPUT: Define outcome ###########
+###############################################
+
+# add code here
+df$unsubmitted <- ifelse(is.na(df$first_attempted_timestamp),1,0)
+
+table(df$unsubmitted)
+
+############################################### 
+############################################### 
+```
+
+## Feature Engineering
+
+**For each graded assessment, identify what data is appropriate for feature engineering**
+
+Before you start feature engineering, you need to constrain the data for **each** assessment.
+
+Remember that the dataset we are aiming for has 1 row per person and assessment with several feature variables and one outcome variable. You created the outcome above. Now you need to create the appropriate features to join. I'm giving you an example for using `deadline = 1707589919` and creating 2 basic features from the clickstream. You should try to create a lot more features, including complex ones, that can use the clickstream or other datasets (but remember the timing constraint).
+
+```{r}
+secs_in_day = 60 * 60 * 24
+example_deadline = 1707589919
+
+example_features = cl %>% 
+    filter(timestamp < example_deadline - secs_in_day) %>%
+    group_by(hash_id) %>%
+    summarise(
+        num_events = n(),
+        num_prob_check = sum(event_type=="problem_check")
+    )
+
+head(example_features)
+```
+
+*Question 3:* Engineer features for each student and assessment, subject to the timing constraint.
+
+```{r}
+############################################### 
+###### BEGIN INPUT: Engineer features #########
+###############################################
+
+
+# MA Features
+missed_assignment <- vector("logical", nrow(df))
+sum_missed_assignment <- vector("numeric", nrow(df))
+percent_grade <- vector("numeric", nrow(df))
+time_before_deadline <- vector("numeric", nrow(df))
+num_prior_ass <- vector("numeric", nrow(df))
+for (i in 1:nrow(df)) {
+  temp = df %>%
+    filter(hash_id == df$hash_id[i]) %>%
+    filter(deadline < (df$deadline[i] - secs_in_day))
+  
+  missed_assignment[i] = ifelse(any(is.na(temp$first_attempted_timestamp)),1,0)
+  
+  sum_missed_assignment[i] = sum(is.na(temp$first_attempted_timestamp))
+  
+  grade = sum(temp$earned_graded)/sum(temp$possible_graded)
+  percent_grade[i] = ifelse(is.na(grade), .75, grade)
+  
+  time = mean(temp$deadline - temp$first_attempted_timestamp)
+  time_before_deadline[i] = ifelse(is.na(time), 0, time/secs_in_day)
+  
+  num_prior_ass[i] = nrow(temp)
+}
+df$missed_assignment <- missed_assignment
+df$sum_missed_assignment <- sum_missed_assignment
+df$percent_grade <- percent_grade
+df$submit_before_deadline <- time_before_deadline
+df$num_prior_ass <- num_prior_ass
+df$num_prior_ass2 <- num_prior_ass^2
+
+opened_assignment <- vector("numeric", nrow(df))
+completed_assignment <- vector("numeric", nrow(df))
+for (i in 1:nrow(df)) {
+  opened_assignment[i] = ifelse(df$created_timestamp[i] < (df$deadline[i] - secs_in_day),1,0)
+  complete = ifelse(df$first_attempted_timestamp[i] < (df$deadline[i] - secs_in_day),1,0)
+  completed_assignment[i] = ifelse(is.na(complete),0,complete)
+}
+
+df$opened_assignment <- opened_assignment
+df$completed_assignment <- completed_assignment
+
+#CL Features
+num_click_events <- vector("numeric", nrow(df))
+num_problem_checks <- vector("numeric", nrow(df))
+
+for (i in 1:nrow(df)) {
+  temp = cl %>%
+    filter(hash_id == df$hash_id[i]) %>%
+    filter(timestamp < (df$deadline[i] - secs_in_day)) %>%
+    filter(timestamp > (df$deadline[i] - 8*secs_in_day))
+  
+  num_click_events[i] = nrow(temp)
+  
+  num_problem_checks[i] = nrow(temp %>% filter(event_type == "problem_check"))
+  
+}
+
+df$num_click_events <- num_click_events^.5
+df$num_problem_checks <- num_problem_checks
+
+module_feature <- df %>%
+  arrange(hash_id, deadline) %>%
+  group_by(hash_id) %>%
+  mutate(module_rank = row_number()) %>%
+  group_by(hash_id) %>%
+  mutate(previous_unsubmitted = lag(cummean(unsubmitted), default = 0)) %>%
+  ungroup() %>%
+  select(hash_id, module_id, previous_unsubmitted)
+
+student_feature <- ma %>%
+  inner_join(deadline, by = "module_id") %>%
+  mutate(early_submission = first_attempted_timestamp <= deadline - secs_in_day) %>%
+  group_by(hash_id) %>%
+  summarise(
+    previous_score = sum(earned_graded, na.rm = TRUE) / sum(possible_graded, na.rm = TRUE),
+    proportion_early = sum(early_submission, na.rm = TRUE) / n()
+  )
+
+df <- df %>%
+  left_join(module_feature, by = c("hash_id", "module_id")) %>%
+  inner_join(student_feature, by = "hash_id")
+
+df <- df %>%
+  select(-c(first_attempted_timestamp, created_timestamp, modified_timestamp, earned_graded, possible_graded, hash_id, created, modified, grade, max_grade, deadline, p_unsubmitted))
+
+
+  
+###############################################
+###############################################
+```
+
+```{r}
+sum(df$opened_assignment)
+sum(df$completed_assignment)
+```
+```{r}
+
+cor(select(df, where(is.numeric)))
+```
+
+# Step 4: Split your dataset
+
+*Question 4:* We would like to train the model on earlier assessments in order to make early alert predictions for later ones. As the hold-out test set, designate the four (4) last assessments (i.e. with the 4 latest computed deadlines, or the last 4 periods; same thing). You will use all the remaining data to train. Note that this may not be the best setup for all applications (e.g. if we wanted to use the model at the start of the course next year, but it is a reasonable approach if we wanted to use the model for the rest of this course offering). Identify the module_ids of the last four assignments, put data associated with their periods in the `test` dataset. Take all the remaining data (earlier periods excluding the last 4) and put it in the `train` dataset.
+
+```{r}
+############################################### 
+######## BEGIN INPUT: Split dataset ###########
+###############################################
+
+library(dplyr)
+set.seed(123)
+# Identify last 4 periods for testing
+last_four_module_ids <- deadline %>%
+  arrange(desc(deadline)) %>%
+  dplyr::slice(1:4) %>%
+  pull(module_id)
+
+# Split the dataset into train and test based on the module_ids or periods
+test <- df %>%
+  filter(module_id %in% last_four_module_ids) %>%
+  select(-c(module_id, module_type))
+train <- df %>%
+  filter(!(module_id %in% last_four_module_ids)) %>%
+  select(-c(module_id, module_type))
+
+###############################################
+###############################################
+```
+
+# Step 5: Train your models
+
+*Question 5:* Train a prediction model and iterate on it. You should try out different algorithms that you have learned so far. You can go back and check your features and refine them to get better performance. To check how well you are doing, you should focus on your training data and compute the F1 score: `F1 = 2/[(1/recall)+(1/precision)]`. Report your F1 score on the training data below (don't forget this!).
+
+```{r}
+############################################### 
+####### BEGIN INPUT: Train and report #########
+###############################################
+
+set.seed(123)
+
+
+library(xgboost)
+library(themis)
+
+
+train$unsubmitted <- as.factor(train$unsubmitted)
+
+eval = function(cm){
+  accuracy = sum(diag(cm))/sum(cm)
+  recall = cm[2,2]/sum(cm[2,])
+  precision= cm[2,2]/sum(cm[,2])
+  return(2 / (1/recall + 1/precision))
+}
+
+# Set up a recipe with SMOTE for the training data because the dataset is imbalanced
+rec <- recipe(unsubmitted ~ ., data = train) %>%
+  step_smote(unsubmitted)
+
+# Prepare the recipe
+prep_rec <- prep(rec)
+
+# Apply the recipe to create a balanced training set
+train_balanced <- bake(prep_rec, new_data = NULL)
+
+#Tree model
+library(rpart)
+tree_model = rpart(unsubmitted ~., data = train_balanced, method = "class")
+
+cptree_model = tree_model$cptable[which.min(tree_model$cptable[,"xerror"]), "CP"]
+ptree_model = rpart::prune(tree_model, cp = cptree_model)
+
+# Get predictions
+# add code here
+p_treereg = predict(ptree_model, newdata = train_balanced, type = "class")
+
+# Compute accuracy, recall, precision, and F1
+cm_treereg = table(true = train_balanced$unsubmitted, predicted = p_treereg)
+
+F1 = eval(cm_treereg)
+  
+# Training F1 score is ...
+print("The training F1 for Tree model is: ")
+F1
+print("The training confusion matrix for Tree model is: ")
+cm_treereg
+
+```
+```{r}
+train_balanced$unsubmitted <- as.numeric(train_balanced$unsubmitted)-1
+```
+
+```{r}
+set.seed(123)
+library(gbm)
+# Fit the model
+
+num_tree = 96
+
+model_gbm <- gbm(unsubmitted ~ ., data = train_balanced, distribution = "bernoulli", n.trees = num_tree, interaction.depth = 3)
+
+# Make predictions
+predictions_gbm <- predict(model_gbm, newdata = train_balanced, n.trees = num_tree, type = "response")
+predicted_classes_gbm <- ifelse(predictions_gbm > 0.5, 1, 0)
+
+
+cm_gbm = table(true = train_balanced$unsubmitted, predicted = predicted_classes_gbm)
+F1 = eval(cm_gbm)
+  
+# Training F1 score is ...
+print("The training F1 for GBM model is: ")
+F1
+print("The training confusion matrix for GBM model is: ")
+cm_gbm
+
+###############################################
+###############################################
+```
+We achieved the best training F1 score of 0.972524 using the GBM model and a balanced training dataset.
+
+# Step 6: Test your model
+
+*Question 6:* Using the model that you arrived at, predict on the held-out test data and report your final F1 score. Typically, you would only do this once at the very end, but for this project it is actually rather hard to do well on the test set, so you can try your model (sparingly to avoid overfitting too much) on the test data to compute the testing F1 score.
+
+```{r}
+############################################### 
+####### BEGIN INPUT: Test and report ##########
+###############################################
+set.seed(123)
+
+# Make predictions on the test dataset
+predictions_gbm <- predict(model_gbm, newdata = test, n.trees = num_tree, type = "response")
+predicted_classes_gbm <- ifelse(predictions_gbm > 0.5, 1, 0)
+
+cm_gbm = table(true = test$unsubmitted, predicted = predicted_classes_gbm)
+F1 = eval(cm_gbm)
+
+# Testing F1 score is ...
+print("The testing F1 for GBM model is: ")
+F1
+print("The testing confusion matrix for GBM model is: ")
+cm_gbm
+
+#Testing tree model
+p_treeregt = predict(ptree_model, newdata = test, type="class")
+
+# Compute F1
+# add code here
+cm_treeregt = table(true = test$unsubmitted, predicted = p_treeregt)
+
+F1t = eval(cm_treeregt)
+
+# Testing F1 score is ...
+print("The testing F1 for Tree model is: ")
+F1t
+print("The testing confusion matrix for Tree model is: ")
+cm_treeregt
+
+###############################################
+###############################################
+```
+We achieved the highest testing F1 score of 0.6969697 using GBM model.
+
+# Step 7: Report
+
+*Question 7:* As a team, write a brief report. Imagine your supervisor asked you to investigate the possibility of an early warning system. She would like to know what model to use, what features are important, and most importantly how well it would work. Given what you've learned, would you recommend implementing the system? Write your report answering the above questions here:
+
+%######## BEGIN INPUT: Summarize findings \############
+
+Our team built a one-day early warning system for missing a graded submission. Specifically, one day before the submission deadline, the model predicts whether a student will forget to submit an assignment so that the system can send a reminder. We built prediction models with a tree model and a GBM model. 
+Based on the GBM model’s metrics, we would recommend implementing the system using the GBM model. We achieved the highest F1 training (0.9621795) and testing score (0.6969697) using this model. This means that the model is fitted well with the data and can also be generalized to more students and assignments. Additionally, the early warning system aims to send out reminders to all students who will actually miss their assignment, so it is important our model will classify as many students who will miss the assignment accurately. On the GBM training model, we achieved a recall of .975, meaning that 97.5% of students who actually missed the assignment would have received a reminder using our model (the testing set’s recall was .82). The training model also had an accuracy of .96, meaning that the model classifies a student correctly 96% of the time (the testing model’s accuracy is .94).
+
+Among the diverse features we created and analyzed, five features particularly stand out for their pivotal roles.
+
+The missed_assignment feature directly highlights a student's past submission behavior, serving as a critical predictor for future tendencies. It highlights individuals with a history of missed assignments, identifying them as higher risk for future assignments. Similarly, the percent_grade metric offers insights into a student's academic performance, with higher grades generally leading to better engagement and a lower probability of missing assignments. This suggests that academic success might be a motivator for consistent assignment submission.
+
+Additionally, the time_before_deadline feature sheds light on a student's time management skills, revealing how far in advance assignments are typically submitted. Early submissions indicate good planning and lower risk of missing deadlines. The num_click_events serves as a proxy for a student's engagement with the course content, with more interactions suggesting a proactive approach towards learning and assignment completion. Lastly, the opened_assignment indicator reveals whether a student has begun working on an assignment at least a day before its deadline, directly impacting the likelihood of timely submission.
+
+These features, among others (which are represented in our model but not discussed), collectively enhance the model's ability to accurately identify students at risk of missing submissions, and allow us to curate our early warning system.
+
+
+%###############################################
+
+# Estimate time spent
+
+**We want to give students an estimate of how much time this project will take. Please indicate how many hours you spent as a team to complete this project here.**
+
+-   I spent 6 hours.
+
+# Generative AI usage
+
+**As stated in the course syllabus, using generative AI is allowed to help you as you complete this project. We are interested in how it is being used and whether it is helpful for you.**
+
+-   How much did you use generative AI (e.g., not at all, some, most, or all the questions) and which one did you use? ChatGPT and HiTA
+-   If you used generative AI, how did you use it and was it helpful? Mostly for syntax, not super helpful for much else.
+
+# Submit Project
+
+This is the end of the project. Please **Knit a Word doc report** that shows both the R code and R output and upload it on the EdX platform. EACH TEAM MEMBER NEEDS TO SUBMIT THE REPORT ON EDX TO GET CREDIT.
